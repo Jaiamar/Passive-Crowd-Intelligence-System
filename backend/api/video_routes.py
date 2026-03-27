@@ -30,10 +30,32 @@ _cam_env = os.environ.get("CAMERA_DEVICE", "").strip()
 CAMERA_DEVICE = int(_cam_env) if _cam_env else -1
 
 
+# Windows backends to try in order - DSHOW is required for virtual cameras like Iriun
+_WIN_BACKENDS = [
+    (cv2.CAP_DSHOW, "DSHOW"),   # DirectShow - works with Iriun / virtual cams
+    (cv2.CAP_MSMF, "MSMF"),    # Media Foundation fallback
+    (cv2.CAP_ANY,  "ANY"),      # Last resort default
+]
+
+
+def _try_open(idx: int) -> "tuple[cv2.VideoCapture | None, str]":
+    """
+    Try opening camera `idx` with DSHOW first, then MSMF, then default.
+    Returns (cap, backend_name) on success, (None, '') on failure.
+    """
+    for api, name in _WIN_BACKENDS:
+        cap = cv2.VideoCapture(idx, api)
+        if cap.isOpened():
+            print(f"[VideoWS] Camera {idx} opened with backend={name}")
+            return cap, name
+        cap.release()
+    return None, ""
+
+
 def find_best_camera() -> int:
     """
-    Scan device indices 0-4 and return the highest one that opens successfully.
-    Iriun registers after the built-in webcam, so the highest index = Iriun.
+    Scan device indices 0-4 using DirectShow (required for Iriun on Windows).
+    Returns the highest index that opens — Iriun registers after built-in webcam.
     Returns -1 if no camera found.
     """
     if CAMERA_DEVICE >= 0:
@@ -41,11 +63,10 @@ def find_best_camera() -> int:
         return CAMERA_DEVICE
     best = -1
     for idx in range(5):
-        cap = cv2.VideoCapture(idx)
-        if cap.isOpened():
+        cap, _ = _try_open(idx)
+        if cap is not None:
             best = idx
-            print(f"[VideoWS] Camera device {idx} available")
-        cap.release()
+            cap.release()
     print(f"[VideoWS] Auto-selected camera device: {best}")
     return best
 
@@ -55,13 +76,14 @@ calibration_store: dict[str, dict] = {}
 
 @router.get("/api/cameras")
 async def list_cameras():
-    """List all available camera devices (index 0-4)."""
+    """List all available camera devices (index 0-4), detected via DirectShow."""
     available = []
     for idx in range(5):
-        cap = cv2.VideoCapture(idx)
-        if cap.isOpened():
+        cap, backend = _try_open(idx)
+        if cap is not None:
             available.append({
                 "index": idx,
+                "backend": backend,
                 "label": f"Device {idx}" + (" (Built-in / Laptop Webcam)" if idx == 0 else f" (External / Iriun #{idx})"),
             })
             cap.release()
@@ -179,9 +201,9 @@ async def video_websocket(websocket: WebSocket):
             webcam_ok = False
             source_label = "No camera found"
         else:
-            cap = cv2.VideoCapture(device_idx)
-            webcam_ok = cap.isOpened()
-            source_label = f"Camera device {device_idx}"
+            cap, backend = _try_open(device_idx)
+            webcam_ok = cap is not None
+            source_label = f"Camera device {device_idx} ({backend})"
 
     if webcam_ok and cap is not None:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
