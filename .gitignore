@@ -18,8 +18,10 @@ env/
 # Secrets / Environment variables (keep template only)
 # backend/.env is included intentionally as a blank template
 
-# YOLO weights (large binary assets)
-# backend/yolo11n.pt
+# YOLO weights (large binary assets - download separately via ultralytics)
+backend/yolo11n.pt
+*.pt
+*.pth
 
 # Node.js / Next.js
 frontend/node_modules/

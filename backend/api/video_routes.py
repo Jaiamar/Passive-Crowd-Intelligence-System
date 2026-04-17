@@ -52,23 +52,39 @@ def _try_open(idx: int) -> "tuple[cv2.VideoCapture | None, str]":
     return None, ""
 
 
-def find_best_camera() -> int:
+def find_iriun_camera() -> int:
     """
-    Scan device indices 0-4 using DirectShow (required for Iriun on Windows).
-    Returns the highest index that opens — Iriun registers after built-in webcam.
-    Returns -1 if no camera found.
+    Locate the Iriun virtual webcam via DirectShow (DSHOW).
+    Strategy:
+      - If CAMERA_DEVICE is set in .env, use it directly.
+      - Otherwise scan indices 1-9 with DSHOW only (skip 0 = built-in webcam).
+        Iriun registers as a DirectShow virtual device at index >= 1.
+    Returns the device index on success, or -1 if not found.
     """
     if CAMERA_DEVICE >= 0:
-        print(f"[VideoWS] Using fixed camera device: {CAMERA_DEVICE}")
+        print(f"[Camera] Fixed device override: {CAMERA_DEVICE}")
         return CAMERA_DEVICE
-    best = -1
-    for idx in range(5):
-        cap, _ = _try_open(idx)
-        if cap is not None:
-            best = idx
+
+    print("[Camera] Scanning for Iriun (skipping index 0 = built-in webcam)...")
+    for idx in range(1, 10):  # Skip 0 (laptop cam), scan 1-9 for Iriun
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            ret, _ = cap.read()          # Confirm it actually delivers frames
             cap.release()
-    print(f"[VideoWS] Auto-selected camera device: {best}")
-    return best
+            if ret:
+                print(f"[Camera] Iriun found at index {idx} (DSHOW)")
+                return idx
+            else:
+                print(f"[Camera] Index {idx} opens but gives no frames — skipping")
+        else:
+            cap.release()
+
+    print("[Camera] Iriun not found. Is the Iriun app open and connected?")
+    return -1
+
+
+# Keep old name as alias so existing call-sites still work
+find_best_camera = find_iriun_camera
 
 # Per-session calibration data
 calibration_store: dict[str, dict] = {}
@@ -76,18 +92,39 @@ calibration_store: dict[str, dict] = {}
 
 @router.get("/api/cameras")
 async def list_cameras():
-    """List all available camera devices (index 0-4), detected via DirectShow."""
+    """List all available camera devices (index 0-9), detected via DirectShow."""
     available = []
-    for idx in range(5):
-        cap, backend = _try_open(idx)
-        if cap is not None:
+    for idx in range(10):
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            label_suffix = " (Built-in / Laptop Webcam)" if idx == 0 else f" (Iriun / External #{idx})"
             available.append({
                 "index": idx,
-                "backend": backend,
-                "label": f"Device {idx}" + (" (Built-in / Laptop Webcam)" if idx == 0 else f" (External / Iriun #{idx})"),
+                "backend": "DSHOW",
+                "has_frames": ret,
+                "label": f"Device {idx}{label_suffix}",
             })
-            cap.release()
-    return {"cameras": available, "auto_selected": find_best_camera()}
+        cap.release()
+    auto = find_iriun_camera()
+    return {"cameras": available, "iriun_index": auto}
+
+
+@router.get("/api/test-camera")
+async def test_camera():
+    """Debug: try to open Iriun and return first-frame info."""
+    idx = find_iriun_camera()
+    if idx < 0:
+        return {"status": "error", "message": "Iriun not found. Open the Iriun app on your phone first."}
+    cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        return {"status": "error", "message": f"Could not open device {idx} with DSHOW"}
+    ret, frame = cap.read()
+    cap.release()
+    if not ret or frame is None:
+        return {"status": "error", "message": f"Device {idx} opened but returned no frames"}
+    h, w = frame.shape[:2]
+    return {"status": "ok", "device_index": idx, "resolution": f"{w}x{h}"}
 
 
 @router.post("/api/calibrate")
